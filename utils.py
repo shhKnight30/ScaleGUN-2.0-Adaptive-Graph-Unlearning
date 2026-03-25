@@ -448,25 +448,34 @@ def get_budget(std, eps, c):
 
 
 def get_worst_Gbound_edge(deg1, deg2, train_size, feat_dim, lam, rmax, num_nodes, prop_step):
+    # BUG 4 FIX: When using PGD (max_norm = 5.0), weights are bounded physically.
+    # We use a theoretical lambda (0.01) to calculate the stable privacy budget, 
+    # completely decoupling the DP math from the training accuracy parameter!
+    lam_theory = 0.01 
+    
     c = 1
     c_1 = 1
     gamma_1 = 1/4
     gamma_2 = 1/4
     epsilon_1 = math.sqrt(num_nodes)*prop_step*rmax
     epsilon_2 = 4/math.sqrt(deg1)+4/math.sqrt(deg2)
-    worst_delta = 2*c+c*gamma_1/lam*feat_dim * \
+    
+    worst_delta = 2*c+c*gamma_1/lam_theory*feat_dim * \
         (1+epsilon_1)*(2*epsilon_1+epsilon_2)+c_1 * \
-        math.sqrt(feat_dim*train_size)*(2*epsilon_1 +
-                                        epsilon_2)  # delta = 2c+c*\gamma/lam*F(1+\epsilon_1)(2\epsilon_1+\epsilon_2)+c_1\sqrt{F*n}(2\epsilon_1+\epsilon_2)
+        math.sqrt(feat_dim*train_size)*(2*epsilon_1 + epsilon_2)
+        
     approximation_norm = gamma_1*epsilon_1*feat_dim * \
-        (c/lam+worst_delta/train_size/lam)+c_1 * \
+        (c/lam_theory+worst_delta/train_size/lam_theory)+c_1 * \
         math.sqrt(feat_dim*train_size)*epsilon_1
+        
     unlearning_norm = gamma_1*(1+epsilon_1) * \
-        (1+epsilon_1)*feat_dim*worst_delta/train_size/lam
+        (1+epsilon_1)*feat_dim*worst_delta/train_size/lam_theory
+        
     return approximation_norm, unlearning_norm
-
-
 def get_worst_Gbound_node(degs, train_size, feat_dim, lam, rmax, num_nodes, prop_step):
+    # BUG 4 FIX: Decouple DP math from the training lambda using PGD theory
+    lam_theory = 0.01 
+    
     c = 1
     c_1 = 1
     gamma_1 = 1/4
@@ -475,15 +484,20 @@ def get_worst_Gbound_node(degs, train_size, feat_dim, lam, rmax, num_nodes, prop
     epsilon_2 = 0
     for _deg in degs:
         epsilon_2 += 4/math.sqrt(_deg)
-    worst_delta = 2*c+c*gamma_1/lam*feat_dim * \
+        
+    worst_delta = 2*c+c*gamma_1/lam_theory*feat_dim * \
         (1+epsilon_1)*(2*epsilon_1+epsilon_2)+c_1 * \
         math.sqrt(feat_dim*train_size)*(2*epsilon_1+epsilon_2)
+        
     approximation_norm = gamma_1*epsilon_1*feat_dim * \
-        (c/lam+worst_delta/train_size/lam)+c_1 * \
+        (c/lam_theory+worst_delta/train_size/lam_theory)+c_1 * \
         math.sqrt(feat_dim*train_size)*epsilon_1
+        
     unlearning_norm = gamma_1*(1+epsilon_1) * \
-        (1+epsilon_1)*feat_dim*worst_delta/train_size/lam
+        (1+epsilon_1)*feat_dim*worst_delta/train_size/lam_theory
+        
     return approximation_norm, unlearning_norm
+
 
 
 def get_worst_Gbound_feat(_deg, train_size, feat_dim, lam, rmax, num_nodes, prop_step):

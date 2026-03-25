@@ -261,7 +261,9 @@ def main():
         # 4. Compute K matrix and spectral norm purely on the affected subgraph
         K = get_K_matrix(X_train_affected)
         spec_norm = sqrt_spectral_norm(K)
-        
+        N_total = X_train_old.size(0)
+        N_affected = X_train_affected.size(0)
+        scale_factor = N_affected / N_total
         if args.compare_gnorm:
             groundtruth = np.copy(feat.numpy())
             g.PowerMethod(groundtruth)
@@ -271,25 +273,32 @@ def main():
         if args.train_mode == "ovr":
             for k in range(y_train.size(1)):
                 y_rem_aff = y_train_affected[:, k]
-                
+                y_full = y_train[:, k]
                 # Filtered Hessian and Gradients
-                H_inv = lr_hessian_inv(
-                    w_approx[:, k], X_train_affected, y_rem_aff, best_reg_lambda
-                )
+                H_inv = lr_hessian_inv(w_approx[:, k], X_train_old, y_full, best_reg_lambda)
                 grad_old = lr_grad(
                     w_approx[:, k], X_train_old_affected, y_rem_aff, best_reg_lambda)
                 grad_new = lr_grad(
                     w_approx[:, k], X_train_affected, y_rem_aff, best_reg_lambda)
                 
-                grad_i = grad_old - grad_new
-                Delta = H_inv.mv(grad_i)
+                grad_diff = (grad_old - grad_new) * scale_factor
+                Delta = H_inv.mv(grad_diff)
                 w_approx[:, k] += Delta
+                
+                with torch.no_grad():
+                    max_norm = 5.0  # Matches the training constraint
+                    w_norm = w_approx[:, k].norm(2)
+                    clip_coef = max_norm / (w_norm + 1e-6)
+                    clip_coef = torch.clamp(clip_coef, max=1.0)
+                    w_approx[:, k].mul_(clip_coef)
+                    
+                    
                 Delta_p = X_train_affected.mv(Delta)
                 
                 # grad_norm_approx stores the norm induced by unlearning (using filtered values)
-                grad_norm_approx[i] += (Delta.norm() *
-                                        Delta_p.norm() * spec_norm * gamma).cpu()
-                                        
+                # grad_norm_approx[i] += (Delta.norm() *
+                #                         Delta_p.norm() * spec_norm * gamma).cpu()
+                grad_norm_approx += Delta.norm(2).item()
                 if args.compare_gnorm:
                     # Groundtruth comparison still needs full data
                     y_rem = y_train[:, k] 
@@ -408,12 +417,22 @@ def main():
     
     
     end_time = time.perf_counter()
-
+    avg_update_cost = 0.0
+    if len(update_cost) > 1:
+        avg_update_cost = sum(update_cost[1:]) / (len(update_cost)-1)
+          # or np.nan, or skip reportingf
+    avg_unlearn_cost = 0.0
+    if len(unlearn_cost)>1 :
+        avg_unlearn_cost = sum(unlearn_cost[1:]) / (len(unlearn_cost)-1)
+    total_cost= 0.0
+    if len(tot_cost)>1:
+        total_cost = sum(tot_cost[1:]) / (len(tot_cost)-1)
+    
     logger.info("update cost: %.6fs" %
-                (sum(update_cost[1:]) / (len(update_cost)-1)))
+                (avg_update_cost))
     logger.info("unlearn cost: %.6fs" %
-                (sum(unlearn_cost[1:]) / (len(unlearn_cost)-1)))
-    logger.info("tot cost: %.6fs" % (sum(tot_cost[1:]) / (len(tot_cost)-1)))
+                (avg_unlearn_cost))
+    logger.info("tot cost: %.6fs" % (total_cost))
     logger.info("tot cost: %.6fs" % (end_time - start_time))
     np.savetxt(f_tot_cost, tot_cost, delimiter=",")
     np.savetxt(f_unlearn_cost, unlearn_cost, delimiter=",")

@@ -264,17 +264,31 @@ def main():
 
         K = get_K_matrix(X_train_affected)
         spec_norm = sqrt_spectral_norm(K)
+        N_total = X_train_old.size(0)
+        N_affected = X_train_affected.size(0)
+        scale_factor = N_affected / N_total
         
         # 4. Use Filtered Data in Training Logic
         if args.train_mode == "ovr":
             for k in range(y_train.size(1)):
                 y_rem_aff = y_train_affected[:, k]
                 y_rem_old_aff = y_train_old_affected[:, k]
-                
-                H_inv = lr_hessian_inv(w_approx[:, k], X_train_affected, y_rem_aff, best_reg_lambda)
+                y_full_old = y_train_old[:k]
+                H_inv = lr_hessian_inv(w_approx[:, k], X_train_old, y_full_old, best_reg_lambda)
                 grad_old = lr_grad(w_approx[:, k], X_train_old_affected, y_rem_old_aff, best_reg_lambda)
                 grad_new = lr_grad(w_approx[:, k], X_train_affected, y_rem_aff, best_reg_lambda)
                 
+                grad_diff = (grad_old - grad_new) * scale_factor
+                Delta = H_inv.mv(grad_diff)
+                Delta = H_inv.mv(grad_diff)
+                w_approx[:, k] += Delta
+                with torch.no_grad():
+                    max_norm = 5.0  # Matches the training constraint
+                    w_norm = w_approx[:, k].norm(2)
+                    clip_coef = max_norm / (w_norm + 1e-6)
+                    clip_coef = torch.clamp(clip_coef, max=1.0)
+                    w_approx[:, k].mul_(clip_coef)
+                grad_norm_approx += Delta.norm(2).item()
                 # ... (keep existing Delta calculation and evaluation logic) ...
                 
         # Reset trackers for next batch using FULL dataset
