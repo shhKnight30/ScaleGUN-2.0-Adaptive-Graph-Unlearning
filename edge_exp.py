@@ -283,15 +283,7 @@ def main():
                 
                 grad_diff = (grad_old - grad_new) * scale_factor
                 Delta = H_inv.mv(grad_diff)
-                w_approx[:, k] += Delta
-                
-                with torch.no_grad():
-                    max_norm = 5.0  # Matches the training constraint
-                    w_norm = w_approx[:, k].norm(2)
-                    clip_coef = max_norm / (w_norm + 1e-6)
-                    clip_coef = torch.clamp(clip_coef, max=1.0)
-                    w_approx[:, k].mul_(clip_coef)
-                    
+                w_approx[:, k] += Delta                 
                     
                 Delta_p = X_train_affected.mv(Delta)
                 
