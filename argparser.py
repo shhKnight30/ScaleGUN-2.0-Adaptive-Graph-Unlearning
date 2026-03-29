@@ -92,6 +92,9 @@ def argparser():
     parser.add_argument("--replay", action="store_true", default=False)
     parser.add_argument("--attack_dim", type=int, default=100)
     parser.add_argument("--rand", action="store_true")
+    
+    #for Node influence Maximization ::
+    parser.add_argument('--use_nim', action='store_true', help='Enable Experiment 2: NIM fine-tuning' , default=False)
     args = parser.parse_args()
 
     if args.eps < 0:

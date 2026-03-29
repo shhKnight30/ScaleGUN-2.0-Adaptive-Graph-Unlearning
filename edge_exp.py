@@ -284,13 +284,18 @@ def main():
                 grad_diff = (grad_old - grad_new) * scale_factor
                 Delta = H_inv.mv(grad_diff)
                 w_approx[:, k] += Delta                 
-                    
+                with torch.no_grad():
+                    max_norm = 5.0 
+                    w_norm = w_approx[:, k].norm(2)
+                    clip_coef = max_norm / (w_norm + 1e-6)
+                    clip_coef = torch.clamp(clip_coef, max=1.0)
+                    w_approx[:, k].mul_(clip_coef)
                 Delta_p = X_train_affected.mv(Delta)
                 
                 # grad_norm_approx stores the norm induced by unlearning (using filtered values)
                 # grad_norm_approx[i] += (Delta.norm() *
                 #                         Delta_p.norm() * spec_norm * gamma).cpu()
-                grad_norm_approx += Delta.norm(2).item()
+                grad_norm_approx[i] += Delta.norm(2).item()
                 if args.compare_gnorm:
                     # Groundtruth comparison still needs full data
                     y_rem = y_train[:, k] 
@@ -324,13 +329,17 @@ def main():
                     X_train_new, 
                     y_train,     
                     best_reg_lambda,
+                    init_method=args.init_method,  # ADDED: Initialize properly!
                     weight=None,
                     b=b,
+                    num_steps=args.epochs,         # ADDED: Train for 250 epochs!
                     verbose=args.verbose,
                     opt_choice=args.optimizer,
                     lr=best_lr,
                     wd=best_wd,
-                )
+                    X_val=X_val_new,               # ADDED: Track validation accuracy
+                    y_val=y_val                    # ADDED: Track validation accuracy
+                )               
                 num_retrain += 1
                 
             remove_finish_time = time.perf_counter()
@@ -404,7 +413,7 @@ def main():
         if i % args.disp == 0:
             logger.info(f"DEBUG lengths - acc_removal[0]:{len(acc_removal[0])}, acc_removal[1]:{len(acc_removal[1])}, update_cost:{len(update_cost)}, unlearn_cost:{len(unlearn_cost)}, tot_cost:{len(tot_cost)}, i:{i}")
             logger.info(
-                f"Iteration {i}: Edge del = {edges[0]}, grad_norm_approx = {grad_norm_approx[i]}, Val acc = {acc_removal[0][-1]} Test acc = {acc_removal[1][-1]}, avg update cost: {update_cost[-1]}, avg unlearn cost:{unlearn_cost[-1]}, avg tot cost:{tot_cost[-1]}, num_retrain: {num_retrain}"
+                f"Iteration {i}: Edge del = {edges[0]}, grad_norm_approx = {grad_norm_approx[i]}, Val acc = {acc_removal[0][-1]} Test acc = {acc_removal[1][-1]}, avg update cost: {update_cost[-1]}, avg unlearn cost:{unlearn_cost[-1]}, avg tot cost:{tot_cost[-1]}, num_retrain:{num_retrain}"
             )
     
     

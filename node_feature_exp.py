@@ -288,7 +288,7 @@ def main():
                     clip_coef = max_norm / (w_norm + 1e-6)
                     clip_coef = torch.clamp(clip_coef, max=1.0)
                     w_approx[:, k].mul_(clip_coef)
-                grad_norm_approx += Delta.norm(2).item()
+                grad_norm_approx[i] += Delta.norm(2).item()
                 # ... (keep existing Delta calculation and evaluation logic) ...
                 
         # Reset trackers for next batch using FULL dataset

@@ -1,0 +1,2 @@
+eps,std,rmax,init_acc,final_acc,acc_drop,retrains,unlearn_time
+0.4,0.05,1e-07,0.823,0.8289999961853027,-0.006,999,83.69
