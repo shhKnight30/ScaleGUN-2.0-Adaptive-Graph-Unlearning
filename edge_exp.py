@@ -20,6 +20,18 @@ logging.basicConfig(
 setup_logger(name)
 setup_unlearn_logger(name)
 
+def nim_fine_tuning(w_k, X_aff, y_aff, lam, epochs=5, lr=0.01):
+    w_nim = w_k.clone().detach().requires_grad_(True)
+    optimizer = optim.Adam([w_nim], lr=lr)
+    
+    for _ in range(epochs):
+        optimizer.zero_grad()
+        logits = torch.matmul(X_aff, w_nim)
+        loss = F.binary_cross_entropy_with_logits(logits, y_aff.float(), reduction='mean') + (lam / 2) * torch.sum(w_nim ** 2)
+        loss.backward()
+        optimizer.step()
+        
+    return w_nim.detach()
 
 def main():
     args = argparser()
@@ -274,82 +286,32 @@ def main():
             for k in range(y_train.size(1)):
                 y_rem_aff = y_train_affected[:, k]
                 y_full = y_train[:, k]
-                # Filtered Hessian and Gradients
+                
                 H_inv = lr_hessian_inv(w_approx[:, k], X_train_old, y_full, best_reg_lambda)
-                grad_old = lr_grad(
-                    w_approx[:, k], X_train_old_affected, y_rem_aff, best_reg_lambda)
-                grad_new = lr_grad(
-                    w_approx[:, k], X_train_affected, y_rem_aff, best_reg_lambda)
+                grad_old = lr_grad(w_approx[:, k], X_train_old_affected, y_rem_aff, best_reg_lambda)
+                grad_new = lr_grad(w_approx[:, k], X_train_affected, y_rem_aff, best_reg_lambda)
                 
                 grad_diff = (grad_old - grad_new) * scale_factor
                 Delta = H_inv.mv(grad_diff)
-                w_approx[:, k] += Delta                 
+                w_approx[:, k] += Delta   
+                              
                 with torch.no_grad():
                     max_norm = 5.0 
                     w_norm = w_approx[:, k].norm(2)
                     clip_coef = max_norm / (w_norm + 1e-6)
                     clip_coef = torch.clamp(clip_coef, max=1.0)
                     w_approx[:, k].mul_(clip_coef)
-                Delta_p = X_train_affected.mv(Delta)
-                
-                # grad_norm_approx stores the norm induced by unlearning (using filtered values)
-                # grad_norm_approx[i] += (Delta.norm() *
-                #                         Delta_p.norm() * spec_norm * gamma).cpu()
-                grad_norm_approx[i] += Delta.norm(2).item()
-                if args.compare_gnorm:
-                    # Groundtruth comparison still needs full data
-                    y_rem = y_train[:, k] 
-                    grad_gt_k = lr_grad(
-                        w_approx[:, k], X_groundtruth_train, y_rem, best_reg_lambda)
-                    grad_norm_real[i] += grad_gt_k.norm().cpu()
+
+                if n_affected > 0:
+                    w_approx[:, k] = nim_fine_tuning(
+                        w_approx[:, k], 
+                        X_train_affected, 
+                        y_rem_aff, 
+                        best_reg_lambda
+                    )
                     
-            if args.compare_gnorm:
-                approximation_worst_norm, unlearning_worst_norm = get_worst_Gbound_edge(
-                    deg[edges[0][0]], deg[edges[0][1]], train_size, feat_dim, args.lam, args.rmax, num_nodes, args.prop_step)
-                accum_un_worst_grad_norm += unlearning_worst_norm * \
-                    y_train.size(1)
-                grad_norm_worst[i] = y_train.size(
-                    1)*approximation_worst_norm+accum_un_worst_grad_norm
-                accum_un_worst_grad_norm_arr[i] = accum_un_worst_grad_norm
-                
-            approximation_norm = column_sum_norm*2*y_train.shape[1]
-            accum_un_grad_norm += grad_norm_approx[i]
-            accum_un_grad_norm_arr[i] = accum_un_grad_norm
-            grad_norm_approx[i] = approximation_norm + accum_un_grad_norm
-            
-            if grad_norm_approx[i] > budget:
-                logger.info(
-                    f"The {i}-th removal, grad_norm_approx: {grad_norm_approx[i]}, approximation_norm: {approximation_norm}, retraining..."
-                )
-                accum_un_grad_norm = 0.0
-                b = b_std * torch.randn(feat_dim,
-                                        num_classes).float().to(device)
-                # Note: Retraining MUST happen on the FULL dataset
-                w_approx = ovr_lr_optimize(
-                    X_train_new, 
-                    y_train,     
-                    best_reg_lambda,
-                    init_method=args.init_method,  # ADDED: Initialize properly!
-                    weight=None,
-                    b=b,
-                    num_steps=args.epochs,         # ADDED: Train for 250 epochs!
-                    verbose=args.verbose,
-                    opt_choice=args.optimizer,
-                    lr=best_lr,
-                    wd=best_wd,
-                    X_val=X_val_new,               # ADDED: Track validation accuracy
-                    y_val=y_val                    # ADDED: Track validation accuracy
-                )               
-                num_retrain += 1
-                
-            remove_finish_time = time.perf_counter()
-            X_val_new = X_new[val_mask].to(device)
-            acc_removal[0].append(ovr_lr_eval(
-                w_approx, X_val_new, y_val).item())
-            X_test_new = X_new[test_mask].to(device)
-            acc_removal[1].append(ovr_lr_eval(
-                w_approx, X_test_new, y_test).item())
-                
+                Delta_p = X_train_affected.mv(Delta)
+                grad_norm_approx[i] += Delta.norm(2).item()
         else:
             # --- Binary Classification Filtering ---
             H_inv = lr_hessian_inv(w_approx, X_train_affected, y_train_affected, args.lam)

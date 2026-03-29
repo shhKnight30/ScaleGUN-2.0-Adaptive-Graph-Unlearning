@@ -576,3 +576,5 @@ def get_affected_nodes(edge_index, removed_items, prop_step, feat_dim, x, mode="
     # Return mask where embeddings differ
     diff = (x_orig - x_mod).abs().sum(dim=1)
     return diff > 1e-9
+
+

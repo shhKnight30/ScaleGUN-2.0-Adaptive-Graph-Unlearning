@@ -869,3 +869,30 @@ def lr_eval(w, X, y):
         prediction accuracy
     """
     return X.mv(w).sign().eq(y).float().mean()
+
+
+
+def nim_fine_tuning(w_approx, X_affected, y_affected, lam, epochs=5, lr=0.01):
+    """
+    EXPERIMENT 2: NIM Knowledge Recovery.
+    Gently fine-tunes the weights using ONLY the affected nodes 
+    to recover utility lost during the Newton update.
+    """
+    # Clone the weights so we don't break the PyTorch computation graph
+    w_nim = w_approx.clone().detach().requires_grad_(True)
+    
+    # Use Adam optimizer for a quick, targeted adjustment
+    optimizer = optim.Adam([w_nim], lr=lr)
+    
+    # Fast fine-tuning loop (only runs on the handful of affected nodes)
+    for _ in range(epochs):
+        optimizer.zero_grad()
+        
+        # Calculate loss ONLY on the affected nodes. 
+        # (Make sure 'ovr_lr_loss' matches the name of your actual loss function!)
+        loss = ovr_lr_loss(w_nim, X_affected, y_affected, lam) 
+        
+        loss.backward()
+        optimizer.step()
+        
+    return w_nim.detach()
