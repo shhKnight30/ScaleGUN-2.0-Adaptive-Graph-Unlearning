@@ -634,7 +634,12 @@ def ovr_lr_optimize(
         if verbose:
             logger.info(
                 "Iteration %d: loss = %.6f, grad_norm = %.6f, regularizer loss = %.6f"
-                % (i + 1, loss.cpu(), w.grad.norm(), lam * w.pow(2).sum() / 2)
+                % (
+                    i + 1,
+                    loss.detach().cpu().item(),
+                    w.grad.detach().norm().cpu().item(),
+                    (lam * w.pow(2).sum() / 2).detach().cpu().item(),
+                )
             )
 
         if opt_choice == "LBFGS":

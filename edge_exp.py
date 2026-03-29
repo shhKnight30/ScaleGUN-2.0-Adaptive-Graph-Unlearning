@@ -10,6 +10,7 @@ import logging
 import pytz
 import copy
 from argparser import argparser
+
 name = "edge"
 torch.set_printoptions(precision=10)
 logger = logging.getLogger(name)
@@ -78,8 +79,6 @@ def main():
     init_finish_time = time.perf_counter()
 
     X = torch.FloatTensor(origin_embedding.T)
-    # logger.debug(
-    #     f"ATTEN!!! origin_embedding.T[:10,:3]: {origin_embedding.T[:10,:3]}")
     data.y = data.y.long()
     feat_dim = data.x.shape[1]
     num_classes = data.y.max().item() + 1
@@ -109,13 +108,13 @@ def main():
     best_reg_lambda, best_lr, best_wd = args.lam, args.lr, args.wd
     X_train = X_train.to(device)
     y_train = y_train.to(device)
-    # logger.info(f"b:{b}")
+    
     if args.train_mode == "ovr":
         w = ovr_lr_optimize(
             X_train,
             y_train,
             best_reg_lambda,
-            init_method=args.init_method,  # Add this line
+            init_method=args.init_method,
             weight=None,
             b=b,
             verbose=True,
@@ -171,7 +170,7 @@ def main():
     tot_cost = [train_finish_time - train_time+prop_time,]
     acc_removal = [[val_acc.item()], [test_acc.item()]]
     logger.info("first train cost: %.6fs" % (train_finish_time - train_time))
-    # return
+    
     # remove
     logger.info("start to remove edges...")
     logger.info("*" * 20)
@@ -246,23 +245,17 @@ def main():
         update_finish_time = time.perf_counter()
         
         # --- [EXPERIMENT 3: Filter Data for Newton Update] ---
-        # 1. Mask for training nodes that are affected
         affected_train_mask = train_mask & affected_mask
-        
-        # 2. Extract features/labels for ONLY affected training nodes
         X_train_affected = X_new[affected_train_mask].to(device)
-        # y_train is already sliced by train_mask, so we slice it by affected_mask relative to train nodes
         y_train_affected = y_train[affected_mask[train_mask]] 
-        
-        # 3. Get old features for ONLY affected training nodes
         X_train_old_affected = X_train_old[affected_mask[train_mask]]
 
-        # 4. Compute K matrix and spectral norm purely on the affected subgraph
         K = get_K_matrix(X_train_affected)
         spec_norm = sqrt_spectral_norm(K)
         N_total = X_train_old.size(0)
         N_affected = X_train_affected.size(0)
         scale_factor = N_affected / N_total
+        
         if args.compare_gnorm:
             groundtruth = np.copy(feat.numpy())
             g.PowerMethod(groundtruth)
@@ -300,7 +293,6 @@ def main():
                 Delta_p = X_train_affected.mv(Delta)
                 grad_norm_approx[i] += Delta.norm(2).item()
         else:
-            # --- Binary Classification Filtering ---
             H_inv = lr_hessian_inv(w_approx, X_train_affected, y_train_affected, args.lam)
             grad_old = lr_grad(w_approx, X_train_old_affected, y_train_affected, args.lam)
             grad_new = lr_grad(w_approx, X_train_affected, y_train_affected, args.lam)
@@ -322,8 +314,6 @@ def main():
                 Delta.norm() * Delta_p.norm() * spec_norm * gamma
             ).cpu()
             
-            # evaluate full model if compare_gnorm
-            grad_old_full = lr_grad(w_approx, X_train_new, y_train, args.lam)
             if args.compare_gnorm:
                 grad_norm_real[i] = (
                     lr_grad(w_approx, X_groundtruth_train,
@@ -339,7 +329,6 @@ def main():
                 grad_norm_approx[i] = approximation_norm + accum_un_grad_norm
                 
             if grad_norm_approx[i] > budget:
-                # Retrain the model on FULL DATA
                 accum_un_grad_norm = 0
                 b = b_std * torch.randn(X_new.size(1)).float().to(device)
                 w_approx = lr_optimize(
@@ -355,17 +344,23 @@ def main():
                 )
                 num_retrain += 1
 
-            remove_finish_time = time.perf_counter()
-            X_val_new = X_new[val_mask].to(device)
+        # --- [FIXED EVALUATION BLOCK] ---
+        remove_finish_time = time.perf_counter()
+        X_val_new = X_new[val_mask].to(device)
+        X_test_new = X_new[test_mask].to(device)
+        
+        if args.train_mode == "ovr":
+            acc_removal[0].append(ovr_lr_eval(w_approx, X_val_new, y_val).item())
+            acc_removal[1].append(ovr_lr_eval(w_approx, X_test_new, y_test).item())
+        else:
             acc_removal[0].append(lr_eval(w_approx, X_val_new, y_val).item())
-            X_test_new = X_new[test_mask].to(device)
             acc_removal[1].append(lr_eval(w_approx, X_test_new, y_test).item())
             
         unlearn_cost.append(remove_finish_time - update_finish_time)
-        tot_cost.append(remove_finish_time - update_finish_time+return_time)
+        tot_cost.append(remove_finish_time - update_finish_time + return_time)
         
-        # Reset X_train_old using the FULL dataset for the next iteration
         X_train_old = X_train_new.clone().detach()
+        # --- [END OF FIXED BLOCK] ---
         
         if i % args.disp == 0:
             logger.info(f"DEBUG lengths - acc_removal[0]:{len(acc_removal[0])}, acc_removal[1]:{len(acc_removal[1])}, update_cost:{len(update_cost)}, unlearn_cost:{len(unlearn_cost)}, tot_cost:{len(tot_cost)}, i:{i}")
@@ -373,12 +368,10 @@ def main():
                 f"Iteration {i}: Edge del = {edges[0]}, grad_norm_approx = {grad_norm_approx[i]}, Val acc = {acc_removal[0][-1]} Test acc = {acc_removal[1][-1]}, avg update cost: {update_cost[-1]}, avg unlearn cost:{unlearn_cost[-1]}, avg tot cost:{tot_cost[-1]}, num_retrain:{num_retrain}"
             )
     
-    
     end_time = time.perf_counter()
     avg_update_cost = 0.0
     if len(update_cost) > 1:
         avg_update_cost = sum(update_cost[1:]) / (len(update_cost)-1)
-          # or np.nan, or skip reportingf
     avg_unlearn_cost = 0.0
     if len(unlearn_cost)>1 :
         avg_unlearn_cost = sum(unlearn_cost[1:]) / (len(unlearn_cost)-1)
@@ -386,33 +379,26 @@ def main():
     if len(tot_cost)>1:
         total_cost = sum(tot_cost[1:]) / (len(tot_cost)-1)
     
-    logger.info("update cost: %.6fs" %
-                (avg_update_cost))
-    logger.info("unlearn cost: %.6fs" %
-                (avg_unlearn_cost))
+    logger.info("update cost: %.6fs" % (avg_update_cost))
+    logger.info("unlearn cost: %.6fs" % (avg_unlearn_cost))
     logger.info("tot cost: %.6fs" % (total_cost))
     logger.info("tot cost: %.6fs" % (end_time - start_time))
     np.savetxt(f_tot_cost, tot_cost, delimiter=",")
     np.savetxt(f_unlearn_cost, unlearn_cost, delimiter=",")
     np.savetxt(f_update_cost, update_cost, delimiter=",")
     np.savetxt(f_acc, acc_removal[1], delimiter=",")
+    
     if args.compare_gnorm:
         grad_norm_approx = grad_norm_approx.cpu().numpy()
         grad_norm_real = grad_norm_real.cpu().numpy()
         grad_norm_worst = grad_norm_worst.cpu().numpy()
         accum_un_grad_norm_arr = accum_un_grad_norm_arr.cpu().numpy()
         accum_un_worst_grad_norm_arr = accum_un_worst_grad_norm_arr.cpu().numpy()
-        np.savetxt(statistics_prefix+"_approx.txt",
-                   grad_norm_approx, delimiter=",")
-        np.savetxt(statistics_prefix+"_real.txt",
-                   grad_norm_real, delimiter=",")
-        np.savetxt(statistics_prefix+"_worst.txt",
-                   grad_norm_worst, delimiter=",")
-        np.savetxt(statistics_prefix+"_app_real.txt",
-                   accum_un_grad_norm_arr, delimiter=",")
-        np.savetxt(statistics_prefix+"_app_worst.txt",
-                   accum_un_worst_grad_norm_arr, delimiter=",")
-
+        np.savetxt(statistics_prefix+"_approx.txt", grad_norm_approx, delimiter=",")
+        np.savetxt(statistics_prefix+"_real.txt", grad_norm_real, delimiter=",")
+        np.savetxt(statistics_prefix+"_worst.txt", grad_norm_worst, delimiter=",")
+        np.savetxt(statistics_prefix+"_app_real.txt", accum_un_grad_norm_arr, delimiter=",")
+        np.savetxt(statistics_prefix+"_app_worst.txt", accum_un_worst_grad_norm_arr, delimiter=",")
 
 if __name__ == "__main__":
     main()
