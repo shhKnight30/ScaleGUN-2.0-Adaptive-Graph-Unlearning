@@ -20,19 +20,6 @@ logging.basicConfig(
 setup_logger(name)
 setup_unlearn_logger(name)
 
-def nim_fine_tuning(w_k, X_aff, y_aff, lam, epochs=5, lr=0.01):
-    w_nim = w_k.clone().detach().requires_grad_(True)
-    optimizer = optim.Adam([w_nim], lr=lr)
-    
-    for _ in range(epochs):
-        optimizer.zero_grad()
-        logits = torch.matmul(X_aff, w_nim)
-        loss = F.binary_cross_entropy_with_logits(logits, y_aff.float(), reduction='mean') + (lam / 2) * torch.sum(w_nim ** 2)
-        loss.backward()
-        optimizer.step()
-        
-    return w_nim.detach()
-
 def main():
     args = argparser()
     seed_everything(seeds[args.seed])
@@ -302,7 +289,7 @@ def main():
                     clip_coef = torch.clamp(clip_coef, max=1.0)
                     w_approx[:, k].mul_(clip_coef)
 
-                if n_affected > 0:
+                if args.use_nim and n_affected > 0:
                     w_approx[:, k] = nim_fine_tuning(
                         w_approx[:, k], 
                         X_train_affected, 
@@ -323,6 +310,14 @@ def main():
             Delta_p = X_train_affected.mv(Delta)
             w_approx += Delta
             
+            if args.use_nim and n_affected > 0:
+                w_approx = nim_fine_tuning(
+                    w_approx, 
+                    X_train_affected, 
+                    y_train_affected, 
+                    args.lam
+                )
+                
             grad_norm_approx[i] += (
                 Delta.norm() * Delta_p.norm() * spec_norm * gamma
             ).cpu()
