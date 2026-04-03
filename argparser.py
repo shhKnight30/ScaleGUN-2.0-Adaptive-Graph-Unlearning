@@ -95,6 +95,10 @@ def argparser():
     
     #for Node influence Maximization ::
     parser.add_argument('--use_nim', action='store_true', help='Enable Experiment 2: NIM fine-tuning' , default=False)
+    # --- [EXPERIMENT 4 FLAG] ---
+    parser.add_argument('--use_certdnn', action='store_true', default=False,
+                        help='Enable CertDNN PGD constraint and constant error bound (Exp 4)')
+    
     args = parser.parse_args()
 
     if args.eps < 0:

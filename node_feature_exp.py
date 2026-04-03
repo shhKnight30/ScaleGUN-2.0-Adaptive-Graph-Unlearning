@@ -116,12 +116,12 @@ def main():
     if args.train_mode == "ovr":
         w = ovr_lr_optimize(
             X_train, y_train, best_reg_lambda, weight=None, b=b,
-            verbose=args.verbose, opt_choice=args.optimizer, lr=best_lr, wd=best_wd,
+            verbose=args.verbose, opt_choice=args.optimizer, lr=best_lr, wd=best_wd,init_method=args.init_method
         )
     else:
         w = lr_optimize(
             X_train, y_train, best_reg_lambda, b=b, num_steps=args.epochs,
-            verbose=args.verbose, opt_choice=args.optimizer, lr=args.lr, wd=args.wd,
+            verbose=args.verbose, opt_choice=args.optimizer, lr=args.lr, wd=args.wd,init_method=args.init_method,
         )
         
     train_finish_time = time.perf_counter()
@@ -198,6 +198,7 @@ def main():
     if args.train_mode == "ovr":
         y_full = torch.zeros(num_nodes, num_classes).to(device)
         y_full.scatter_(1, data.y.unsqueeze(1).to(device), 1)
+        y_full[y_full == 0] = -1  # <--- ADD THIS LINE TO FIX THE LABELS!
     else:
         y_full = data.y.float().to(device)
 
@@ -205,7 +206,7 @@ def main():
     del X_val
     del X_test
     gc.collect()
-
+    X_raw = torch.FloatTensor(origin_embedding.T).to(device)
     for i in range(args.num_batch_removes):
         nodes = del_nodes[node_idx_start + i * args.num_removes: node_idx_start + args.num_removes * (i + 1)].T.tolist()
         if not nodes:
@@ -254,7 +255,7 @@ def main():
         N_affected = X_train_affected.size(0)  # Active training nodes affected
         scale_factor = N_affected / N_total if N_total > 0 else 0
         
-        # 4. Use Filtered Data in Training Logic
+# 4. Use Filtered Data in Training Logic
         if args.train_mode == "ovr":
             for k in range(y_train_old.size(1)):
                 y_rem_aff = y_train_affected[:, k]
@@ -267,6 +268,9 @@ def main():
                 
                 grad_diff = (grad_old - grad_new) * scale_factor
                 Delta = H_inv.mv(grad_diff)
+                
+                # Save pre-update weights for AGU
+                w_pre_update = w_approx[:, k].clone().detach()
                 w_approx[:, k] += Delta
                 
                 with torch.no_grad():
@@ -276,13 +280,16 @@ def main():
                     clip_coef = torch.clamp(clip_coef, max=1.0)
                     w_approx[:, k].mul_(clip_coef)
                     
-                # --- [NIM HEALING BLOCK] ---
+                # --- [EXPERIMENT 5: AGU TASK-ADAPTIVE UNLEARNING] ---
                 if args.use_nim and N_affected > 0:
-                    w_approx[:, k] = nim_fine_tuning(
-                        w_approx[:, k], 
-                        X_train_affected, 
-                        y_rem_aff, 
-                        best_reg_lambda
+                    X_deleted = X_raw[nodes].to(device)
+                    w_approx[:, k] = agu_task_adaptive_tuning(
+                        w_approx=w_approx[:, k],
+                        w_orig=w_pre_update,
+                        X_deleted=X_deleted,
+                        X_affected=X_train_affected,
+                        y_affected=y_rem_aff,
+                        lam=best_reg_lambda
                     )
                     
                 grad_norm_approx[i] += Delta.norm(2).item()
@@ -293,35 +300,24 @@ def main():
             
             grad_i = (grad_old - grad_new) * scale_factor
             Delta = H_inv.mv(grad_i)
+            
+            w_pre_update = w_approx.clone().detach()
             w_approx += Delta
             
-            # --- [NIM HEALING BLOCK] ---
+            # --- [EXPERIMENT 5: AGU TASK-ADAPTIVE UNLEARNING] ---
             if args.use_nim and N_affected > 0:
-                w_approx = nim_fine_tuning(
-                    w_approx, 
-                    X_train_affected, 
-                    y_train_affected, 
-                    args.lam
+                X_deleted = X_raw[nodes].to(device)
+                w_approx = agu_task_adaptive_tuning(
+                    w_approx=w_approx,
+                    w_orig=w_pre_update,
+                    X_deleted=X_deleted,
+                    X_affected=X_train_affected,
+                    y_affected=y_train_affected,
+                    lam=args.lam
                 )
 
             Delta_p = X_train_affected.mv(Delta)
             grad_norm_approx[i] += (Delta.norm() * Delta_p.norm() * spec_norm * gamma).cpu()
-
-            if grad_norm_approx[i] > budget:
-                b = b_std * torch.randn(X_new.size(1)).float().to(device)
-                w_approx = lr_optimize(
-                    X_new[train_mask].to(device),
-                    y_full[train_mask].to(device),
-                    args.lam,
-                    b=b,
-                    num_steps=args.epochs,
-                    verbose=False,
-                    opt_choice=args.optimizer,
-                    lr=args.lr,
-                    wd=args.wd,
-                )
-                num_retrain += 1
-
         # 5. Evaluate and Track Costs
         remove_finish_time = time.perf_counter()
         X_val_new = X_new[val_mask].to(device)

@@ -23,7 +23,12 @@ name = "edge_large"
 torch.set_printoptions(precision=10)
 logger = logging.getLogger(name)
 logger.setLevel(logging.DEBUG)
-logging.basicConfig(
+logging.basicConfig(ng: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  from pkg_resources import parse_version
+edge_index:108365 2
+---graph info---
+num_nodes=19717
+num_edges=108365
     level=logging.DEBUG, format="%(levelname)s - %(message)s", handlers=[]
 )
 setup_logger(name)
