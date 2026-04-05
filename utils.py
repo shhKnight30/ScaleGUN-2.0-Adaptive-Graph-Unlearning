@@ -25,6 +25,12 @@ from LINKX_dataset import LINKXDataset
 
 logger = None
 
+_old_load = torch.load
+def _legacy_load(*args, **kwargs):
+    kwargs['weights_only'] = False
+    return _old_load(*args, **kwargs)
+torch.load = _legacy_load
+
 seeds = [8073, 49184, 94208, 1681, 25443,   27880, 75161, 84677,
          32340, 38995, 78096, 37432, 70984,   841, 62755, 23832, 49295,
          63475, 30897]

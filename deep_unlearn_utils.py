@@ -1,197 +1,211 @@
-from torch.utils.data import Dataset
 import torch
-import numpy as np
-import os
-import torch.optim as optim
 import torch.nn.functional as F
+from torch.autograd import grad
+import torch.optim as optim
 import math
-from numpy.linalg import norm
-from sklearn import preprocessing
-from torch import Tensor
-from pathlib import Path
-from torch.nn import init
+import numpy as np
 import logging
 import time
-from torch.autograd import grad
-logger = None
 
+logger = logging.getLogger(__name__)
 
 def setup_unlearn_logger(name):
     global logger
     logger = logging.getLogger(name)
 
+class FastTensorLoader:
+    """Pre-transfers all data to GPU once for zero-latency batching."""
+    def __init__(self, X, y, device, batch_size, shuffle=True):
+        self.X = X.to(device)
+        self.y = y.to(device)
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.n = X.shape[0]
 
-def train_model(model, device, X_train, y_train, batch_size, optimizer, epochs,X_val,y_val,evaluator,checkpt_file,patience,verbose=False,noises=None):
+    def __iter__(self):
+        if self.shuffle:
+            idx = torch.randperm(self.n, device=self.X.device)
+        else:
+            idx = torch.arange(self.n, device=self.X.device)
+        
+        for start in range(0, self.n, self.batch_size):
+            batch_idx = idx[start:start + self.batch_size]
+            yield self.X[batch_idx], self.y[batch_idx]
+
+    def __len__(self):
+        return (self.n + self.batch_size - 1) // self.batch_size
+
+@torch.no_grad()
+def apply_global_pgd(model, pgd_c):
+    """Projects ALL model parameters jointly onto the L2 ball of radius pgd_c."""
+    total_norm_sq = sum(p.data.norm(2).item() ** 2 for p in model.parameters() if p.requires_grad)
+    total_norm = total_norm_sq ** 0.5
+    if total_norm > pgd_c:
+        scale = pgd_c / (total_norm + 1e-8)
+        for p in model.parameters():
+            if p.requires_grad:
+                p.data.mul_(scale)
+
+def train_model(model, device, X_train, y_train, batch_size, optimizer, epochs, X_val, y_val, evaluator, checkpt_file, patience, verbose=True, noises=None, pgd_c=5.0):
+    """Optimized training loop with per-iteration logging."""
+    loader = FastTensorLoader(X_train, y_train, device, batch_size, shuffle=True)
+    num_train = X_train.shape[0]
+    noise_scale = 1.0 / (num_train * 2) if noises is not None else 0
+    
     bad_counter = 0
-    best = 0
-    model.train()
-    start_time=time.time()
-    tot_ep_time=0
-    num_train=X_train.shape[0]
+    best_acc = 0.0
+    start_time = time.time()
+    
     for epoch in range(epochs):
-        one_ep_start_time=time.time()
-        loss_list = []
-        idx=0
-        shuffled_indices = torch.randperm(num_train)
-        X_train_tmp=X_train[shuffled_indices]
-        y_train_tmp=y_train[shuffled_indices]
-        while idx<num_train:
-            x=X_train_tmp[idx:idx+batch_size].to(device)
-            y=y_train_tmp[idx:idx+batch_size].to(device)
-            optimizer.zero_grad()
+        model.train()
+        epoch_loss = 0.0
+        
+        for batch_idx, (x, y) in enumerate(loader):
+            optimizer.zero_grad(set_to_none=True)
+            
             out = model(x)
             loss = F.nll_loss(out, y)
+            
             if noises is not None:
-                for i,param in enumerate(model.parameters()):
-                    if param.requires_grad:
-                        loss+=(param.data*noises[i]).sum()/(num_train<<1)*x.size(0)
+                noise_loss = sum((p * n).sum() for p, n in zip((p for p in model.parameters() if p.requires_grad), noises))
+                loss += noise_loss * noise_scale * x.size(0)
+                
             loss.backward()
             optimizer.step()
-            loss_list.append(loss.item())
-            idx+=batch_size
-            # print(f"epoch: {epoch}, idx: {idx}, GPU memory: {torch.cuda.memory_allocated()/1024/1024}")
-            del x,y,out
-        # print(f"epoch: {epoch}, idx: {idx}, GPU memory: {torch.cuda.memory_allocated()/1024/1024}")
-        train_ep = time.time()-one_ep_start_time
-        tot_ep_time+=train_ep
-        f1_val = test(model, device, X_val,y_val, batch_size,evaluator)
+            
+            epoch_loss += loss.item()
+            
+            # --- Per-Iteration Logging ---
+            if verbose:
+                logger.info(f"Epoch [{epoch+1}/{epochs}] | Iteration [{batch_idx+1}/{len(loader)}] | Batch Loss: {loss.item():.4f}")
+        
+        # Apply Global PGD
+        if pgd_c is not None:
+            apply_global_pgd(model, pgd_c)
+            
+        # Validation
+        val_acc = test(model, device, X_val, y_val, batch_size, evaluator)
+        
         if verbose:
-            if (epoch + 1) % 10 == 0:
-                print(
-                    f"Epoch:{epoch+1:02d}," f"Train_loss:{loss:.3f}",
-                    f"Valid_acc:{100*f1_val:.2f}%",
-                    f"Time_cost:{train_ep:.3f}/{tot_ep_time:.3f}",
-                )
-        if f1_val > best:
-            best = f1_val
+            logger.info(f"--- End of Epoch {epoch+1} | Avg Train Loss: {epoch_loss/len(loader):.4f} | Val Acc: {100*val_acc:.2f}% ---")
+            
+        if val_acc > best_acc:
+            best_acc = val_acc
             torch.save(model.state_dict(), checkpt_file)
             bad_counter = 0
         else:
             bad_counter += 1
-        if bad_counter ==patience:
-            logger.info(f"{epoch}, Early Stop!")
+            
+        if bad_counter >= patience:
+            logger.info(f"Early Stopping triggered at epoch {epoch+1}")
             break
-        # print(f"epoch: {epoch}, GPU memory: {torch.cuda.memory_allocated()/1024/1024}")
+            
+    return time.time() - start_time
+
+def cal_grad_handloader(model, device, _X, _y, batch_size, retain=False):
+    """Memory-efficient gradient computation without building massive graphs."""
+    model.eval()
+    model.zero_grad(set_to_none=True)
+    params = [p for p in model.parameters() if p.requires_grad]
+    num_data = _X.shape[0]
+    
+    accumulated = [torch.zeros_like(p) for p in params]
+    
+    for start in range(0, num_data, batch_size):
+        x = _X[start:start+batch_size].to(device)
+        y = _y[start:start+batch_size].to(device)
+        out = model(x)
+        loss = F.nll_loss(out, y, reduction='sum') / num_data
         
-    train_time = time.time() - start_time
-    # logger.info(f"Train cost: {train_time:.2f}s")
-    # logger.info(f"Train epochs cost: {tot_ep_time:.2f}s")
-    # logger.info(f"Avg loss: {np.mean(loss_list):.4f}")
-    return train_time
-
-
-def cal_grad(model, device, loader,retain=False):
-    model.eval()
-    model.zero_grad()
-    model_params = [p for p in model.parameters() if p.requires_grad]
-    tot_loss=torch.zeros(1).cuda(device)
-    for step, (x, y) in enumerate(loader):
-        x, y = x.cuda(device), y.cuda(device)
-        out = model(x)
-        loss = F.nll_loss(out, y,reduction='sum')
-        tot_loss=tot_loss+loss
-    cur_grad = grad(tot_loss/loader.dataset.__len__(), model_params, create_graph=retain)
-    return cur_grad
-
-def cal_grad_handloader(model, device, _X,_y,batch_size,retain=False):
-    model.eval()
-    model.zero_grad()
-    model_params = [p for p in model.parameters() if p.requires_grad]
-    num_data=_X.shape[0]
-    idx=0
-    tot_loss=torch.zeros(1).cuda(device).requires_grad_()
-    while idx<num_data:
-        x=_X[idx:idx+batch_size].to(device)
-        y=_y[idx:idx+batch_size].to(device)
-        out = model(x)
-        loss = F.nll_loss(out, y,reduction='sum')
-        tot_loss=tot_loss+loss
-        idx+=batch_size
-    cur_grad = grad(tot_loss/num_data, model_params, create_graph=retain)
-    return cur_grad
-
-
-def cal_grad_data(model, device, X_train, y_train, retain):
-    model.eval()
-    model.zero_grad()
-    model_params = [p for p in model.parameters() if p.requires_grad]
-    x, y = X_train.cuda(device), y_train.cuda(device)
-    out = model(x)
-    loss = F.nll_loss(out, y, reduction='mean')
-    grads = grad(loss, model_params, create_graph=retain)
-    return grads
-
-def _get_fmin_loss_fn(v, **kwargs):
-    """
-    1/2 x^T H x - v^T x <--> Hx=v
-    """
-    device = kwargs["device"]
-
-    def get_fmin_loss(x):
-        x = torch.tensor(x, dtype=torch.float, device=device)
-        # calculate hvp=Hx
-        _hvp = hvp(kwargs["_grad"].view(-1), kwargs["p"], x).view(-1)  # grad,p,x
-        _hvp += kwargs["damping"] * x
-        obj = 0.5 * torch.dot(_hvp, x) - torch.dot(v.view(-1), x)
-        return obj.detach().cpu().numpy()
-
-    return get_fmin_loss
-
-
-def _get_fmin_grad_fn(v, **kwargs):
-    device = kwargs["device"]
-
-    def get_fmin_grad(x):
-        x = torch.tensor(x, dtype=torch.float, device=device)
-        _hvp = hvp(kwargs["_grad"].view(-1), kwargs["p"], x).view(-1)
-        _hvp += kwargs["damping"] * x
-        return (_hvp - v.view(-1)).detach().cpu().numpy()
-
-    return get_fmin_grad
-
-def com_accuracy(y_pred, y):
-    pred = y_pred.data.max(1)[1]
-    pred = pred.reshape(pred.size(0),1)
-    correct = pred.eq(y.data).cpu().sum()
-    accuracy = correct.to(dtype=torch.long) * 100. / len(y)
-    return accuracy
-
-@torch.no_grad()
-def test(model, device, X_val, y_val,batch_size, evaluator=None):
-    model.eval()
-    # y_pred, y_true = [], []
-    acc_list=[]
-    num_data=X_val.shape[0]
-    idx=0
-    while idx<num_data:
-        x=X_val[idx:idx+batch_size].to(device)
-        y=y_val[idx:idx+batch_size].to(device)
-        out = model(x)
-        # y_pred.append(torch.argmax(out, dim=1, keepdim=True).cpu())
-        # y_true.append(y.unsqueeze(1))
-        idx+=batch_size
-        acc=com_accuracy(out,y.unsqueeze(1))
-        acc_list.append(acc.item())
-    #     return evaluator.eval(
-    #     {
-    #         "y_true": torch.cat(y_true, dim=0),
-    #         "y_pred": torch.cat(y_pred, dim=0),
-    #     }
-    # )["acc"]
-        del x,y,out
-    return np.mean(acc_list)/100
+        chunk_grad = grad(loss, params, create_graph=retain)
+        for j in range(len(accumulated)):
+            accumulated[j] = accumulated[j] + chunk_grad[j]
+            
+    return tuple(accumulated)
 
 def hvps(grad_all, model_params, h_estimate):
-    element_product = 0
-    for grad_elem, v_elem in zip(grad_all, h_estimate):
-        element_product += torch.sum(grad_elem * v_elem)
+    element_product = sum(torch.sum(g * v) for g, v in zip(grad_all, h_estimate))
+    return grad(element_product, model_params, create_graph=True)
 
-    return_grads = grad(element_product, model_params,create_graph=True)
-    return return_grads
+def lissa_inverse_hvp(v, model, device, X_train, y_train, batch_size=512, recursions=200, damp=1e-4, scale=10.0, tol=1e-5):
+    """Optimized LiSSA with early stopping."""
+    model.eval()
+    params = [p for p in model.parameters() if p.requires_grad]
+    
+    X_gpu = X_train.to(device)
+    y_gpu = y_train.to(device)
+    num_train = X_gpu.shape[0]
+    
+    h_estimate = [item.clone().detach().to(device) for item in v]
+    prev_norm = float('inf')
+    
+    for i in range(recursions):
+        idx = torch.randint(0, num_train, (batch_size,), device=device)
+        x_batch, y_batch = X_gpu[idx], y_gpu[idx]
+        
+        model.zero_grad(set_to_none=True)
+        out = model(x_batch)
+        loss = F.nll_loss(out, y_batch, reduction='mean')
+        
+        grads = torch.autograd.grad(loss, params, create_graph=True)
+        _hvp = hvps(grads, params, h_estimate)
+        
+        with torch.no_grad():
+            for j in range(len(h_estimate)):
+                h_estimate[j] = v[j].to(device) + h_estimate[j] - (_hvp[j] + damp * h_estimate[j]) / scale
+                
+        # Early Stopping Check every 50 steps
+        if (i + 1) % 50 == 0:
+            current_norm = sum(h.norm().item() ** 2 for h in h_estimate) ** 0.5
+            rel_change = abs(current_norm - prev_norm) / (prev_norm + 1e-10)
+            if rel_change < tol:
+                logger.info(f"LiSSA converged early at iteration {i+1}/{recursions}")
+                break
+            prev_norm = current_norm
+            
+    return [h.detach() for h in h_estimate]
 
+def nim_finetune(model, device, X_train, y_train, train_mask, edges, lr=0.001, epochs=5, pgd_c=5.0):
+    """Fine-tunes highly influenced elements after an unlearning step."""
+    affected_set = set()
+    for edge in edges:
+        affected_set.update(edge)
+        
+    train_indices = train_mask.nonzero(as_tuple=True)[0]
+    hie_indices = [i for i, node_id in enumerate(train_indices) if node_id.item() in affected_set]
+    
+    if not hie_indices:
+        return
+        
+    logger.info(f"Triggering NIM: Fine-tuning on {len(hie_indices)} affected nodes...")
+    X_hie = X_train[torch.tensor(hie_indices)].to(device)
+    y_hie = y_train[torch.tensor(hie_indices)].to(device)
+    
+    model.train()
+    optimizer = optim.SGD(model.parameters(), lr=lr * 0.1, momentum=0.9)
+    
+    for _ in range(epochs):
+        optimizer.zero_grad(set_to_none=True)
+        out = model(X_hie)
+        loss = F.nll_loss(out, y_hie)
+        loss.backward()
+        optimizer.step()
+        
+    apply_global_pgd(model, pgd_c)
+    model.eval()
 
-def hvp(_grad, model_param, h_estimate):
-    element_product = torch.sum(_grad * h_estimate)
-
-    return_grads = grad(element_product, model_param,create_graph=True)
-    return return_grads[0]
+@torch.no_grad()
+def test(model, device, X_val, y_val, batch_size, evaluator=None):
+    """Fixed accuracy calculation."""
+    model.eval()
+    correct = 0
+    total = 0
+    
+    for start in range(0, X_val.shape[0], batch_size):
+        x = X_val[start:start+batch_size].to(device)
+        y = y_val[start:start+batch_size].to(device)
+        pred = model(x).argmax(dim=1)
+        correct += (pred == y).sum().item()
+        total += y.size(0)
+        
+    return correct / total
