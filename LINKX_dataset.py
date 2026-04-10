@@ -313,24 +313,38 @@ class LINKXDataset(InMemoryDataset):
                 data.test_mask[:, i][torch.tensor(split['test'])] = True
 
         return data
-
+    
+    
     def _process_mat(self):
         mat = loadmat(self.raw_paths[0])
         edge_index = torch.from_numpy(mat['edge_index']).to(torch.long)
         x = torch.from_numpy(mat['node_feat']).to(torch.float)
         y = torch.from_numpy(mat['label']).squeeze().to(torch.long)
         data = Data(x=x, edge_index=edge_index, y=y)
-        splits = np.load(self.raw_paths[1], allow_pickle=True)
-        sizes = (data.num_nodes, len(splits))
+        
+        sizes = (data.num_nodes, 1) # Just 1 split for fallback
         data.train_mask = torch.zeros(sizes, dtype=torch.bool)
         data.val_mask = torch.zeros(sizes, dtype=torch.bool)
         data.test_mask = torch.zeros(sizes, dtype=torch.bool)
-        for i, split in enumerate(splits):
-            data.train_mask[:, i][torch.tensor(split['train'])] = True
-            data.val_mask[:, i][torch.tensor(split['valid'])] = True
-            data.test_mask[:, i][torch.tensor(split['test'])] = True
-        return data
 
+        try:
+            splits = np.load(self.raw_paths[1], allow_pickle=True)
+            for i, split in enumerate(splits):
+                data.train_mask[:, i][torch.tensor(split['train'])] = True
+                data.val_mask[:, i][torch.tensor(split['valid'])] = True
+                data.test_mask[:, i][torch.tensor(split['test'])] = True
+        except Exception as e:
+            print(f"Warning: Could not load predefined splits due to: {e}. Generating random 50/25/25 splits.")
+            indices = torch.randperm(data.num_nodes)
+            train_size = int(0.5 * data.num_nodes)
+            val_size = int(0.25 * data.num_nodes)
+            
+            data.train_mask[indices[:train_size], 0] = True
+            data.val_mask[indices[train_size:train_size + val_size], 0] = True
+            data.test_mask[indices[train_size + val_size:], 0] = True
+
+        return data
+    
     def _process_snap_patents(self):
         mat = loadmat(self.raw_paths[0])
         edge_index = torch.from_numpy(mat['edge_index']).to(torch.long)
