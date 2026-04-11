@@ -292,33 +292,29 @@ def lissa_inverse_hvp(v, model, device, X_train, y_train,
 # ═══════════════════════════════════════════════════════
 # NIM Fine-Tuning (separate function, called from unlearning loop)
 # ═══════════════════════════════════════════════════════
-def nim_finetune(model, device, X_train, y_train, train_mask,
-                 edges, lr=0.001, nim_epochs=5, pgd_c=5.0):
+def nim_finetune(model, device, X_train, y_train, agu_affected_indices,
+                 lr=0.001, nim_epochs=5, pgd_c=5.0):
     """
-    Post-unlearning fine-tuning on nodes affected by deleted edges.
-    Called AFTER the Hessian weight update.
+    AGU + NIM Fine-Tuning: 
+    Fine-tunes the model ONLY on the nodes identified by AGU's adaptive 
+    neighbor selection (nodes whose features meaningfully shifted).
     """
-    affected_set = set()
-    for edge in edges:
-        affected_set.update(edge)
-
-    train_indices = train_mask.nonzero(as_tuple=True)[0]
-    hie_indices = [
-        i for i, nid in enumerate(train_indices)
-        if nid.item() in affected_set
-    ]
-
-    if len(hie_indices) < 2:
-        logger.info(f"NIM: Only {len(hie_indices)} affected node(s), skipping.")
+    if len(agu_affected_indices) < 2:
+        logger.info(f"NIM/AGU: Only {len(agu_affected_indices)} affected node(s), skipping.")
         return
     
-    logger.info(f"NIM: Fine-tuning on {len(hie_indices)} affected nodes")
+    logger.info(f"NIM/AGU: Fine-tuning on {len(agu_affected_indices)} adaptively affected nodes")
 
-    hie_idx = torch.tensor(hie_indices)
-    X_hie = X_train[hie_idx].to(device)
-    y_hie = y_train[hie_idx].to(device)
+    # Fetch the dynamically affected nodes
+    X_hie = X_train[agu_affected_indices].to(device)
+    y_hie = y_train[agu_affected_indices].to(device)
 
+    # Freeze BatchNorm stats to prevent corruption on small batches
     model.train()
+    for module in model.modules():
+        if isinstance(module, torch.nn.BatchNorm1d):
+            module.eval()
+
     nim_optimizer = optim.SGD(model.parameters(), lr=lr * 0.1, momentum=0.9)
 
     for _ in range(nim_epochs):
@@ -329,9 +325,7 @@ def nim_finetune(model, device, X_train, y_train, train_mask,
 
     apply_pgd_projection(model, pgd_c)
     model.eval()
-    logger.info("NIM fine-tuning complete.")
-
-
+    logger.info("NIM/AGU fine-tuning complete.")
 def apply_lissa_update(model, inverse_hvs, device, max_update_ratio=0.01):
     """
     Apply the LiSSA weight update with norm clamping.

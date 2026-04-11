@@ -278,6 +278,11 @@ def main():
         # ═══════════════════════════════════════════════════
         for edge in edges:
             all_forgotten_nodes.update(edge)
+            
+        # ═══════════════════════════════════════════════════
+        # 1. AGU FIX: Cache the training features BEFORE the C++ update
+        # ═══════════════════════════════════════════════════
+        X_old_train = torch.FloatTensor(origin_embedding.T)[train_mask]
 
         # ═══════════════════════════════════════════════════
         # FIX 3: UpdateEdges + UpdateFeatures
@@ -286,9 +291,9 @@ def main():
             edges, origin_embedding, args.num_threads, update_rmax
         )
 
-        affected_nodes = list(set(node for edge in edges for node in edge))
+        affected_endpoints = list(set(node for edge in edges for node in edge))
         feat_time = g.UpdateFeatures(
-            affected_nodes, origin_embedding, args.num_threads, update_rmax
+            affected_endpoints, origin_embedding, args.num_threads, update_rmax
         )
 
         return_time = struct_time + feat_time
@@ -298,17 +303,32 @@ def main():
         if i < 3:
             logger.info(
                 f"  struct_time={struct_time:.6f}, feat_time={feat_time:.6f}, "
-                f"affected={len(affected_nodes)}"
+                f"affected={len(affected_endpoints)}"
             )
             logger.info(f"  sample AFTER: {origin_embedding[0,:5]}")
 
+        # ═══════════════════════════════════════════════════
+        # 2. AGU FIX: Extract the new training features
+        # ═══════════════════════════════════════════════════
         X_new = torch.FloatTensor(origin_embedding.T)
         update_finish_time = time.perf_counter()
+        
         X_new_train = X_new[train_mask]
         X_new_val = X_new[val_mask]
         X_new_test = X_new[test_mask]
         del X_new
-
+        
+        # ═══════════════════════════════════════════════════
+        # 3. AGU EXACT NEIGHBOR SELECTION (Experiment 3)
+        # Compare old vs new features to find the EXACT affected subgraph
+        # ═══════════════════════════════════════════════════
+        feature_diffs = torch.norm(X_new_train - X_old_train, dim=1)
+        # AGU Marginal Filtering: Only select nodes with meaningful feature shifts
+        # 1e-6 is a safe threshold to ignore floating-point noise
+        agu_affected_indices = (feature_diffs > 1e-6).nonzero(as_tuple=True)[0]
+        del X_old_train
+        
+        
         model_params = [p for p in model.parameters() if p.requires_grad]
         new_grad = cal_grad_handloader(
             model, device, X_new_train, y_train, args.test_batch, retain=True
@@ -349,14 +369,18 @@ def main():
                         per_param_grad = noise_scale / math.sqrt(p.numel())
                         p.data.add_(torch.randn_like(p) * per_param_grad)
 
+        # ═══════════════════════════════════════════════════
+        # 4. AGU FIX: Pass the EXACT affected nodes to NIM
+        # ═══════════════════════════════════════════════════
         if do_nim:
             nim_finetune(
                 model, device, X_new_train, y_train,
-                train_mask, edges, lr=args.lr,
+                agu_affected_indices, # <-- Replaced train_mask and edges
+                lr=args.lr,
                 nim_epochs=nim_epochs,
                 pgd_c=pgd_c
             )
-
+            
         del model_params, inverse_hvs, vs
         gc.collect()
         clear_cache(device)

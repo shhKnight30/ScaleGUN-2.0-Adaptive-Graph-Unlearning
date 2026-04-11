@@ -54,7 +54,7 @@ def argparser():
                         help="In binary mode, is Y_binary class or Y_binary_1 vs Y_binary_2 (i.e., 0+1).",)
     parser.add_argument("--init_method", type=str, default="kaiming",
                         help="init method for parameter w [kaiming/xavier/zero]",)
-    parser.add_argument("--optimizer", type=str, default="LBFGS",
+    parser.add_argument("--optimizer", type=str, default="Adam",
                         help="Choice of optimizer. [LBFGS/Adam]",)
     parser.add_argument("--wd", type=float, default=5e-4,
                         help="Weight decay factor for Adam")
@@ -82,7 +82,32 @@ def argparser():
     parser.add_argument("--removal_mode", default="node", type=str)
     parser.add_argument("--compare_retrain",
                         action="store_true", default=False)
-
+    parser.add_argument('--compute_metrics', action='store_true', default=False)
+    parser.add_argument('--retrain', action='store_true', default=False)
+    parser.add_argument('--agu_check', action='store_true', default=False)
+    
+    parser.add_argument('--csv_output', type=str, default='')
+    parser.add_argument('--metric_every', type=int, default=1)
+    parser.add_argument('--mia_num_samples', type=int, default=500)
+    
+    parser.add_argument('--pgd_c', type=float, default=5.0)
+    parser.add_argument('--pgd_mode', type=str, default='per_param')
+    
+    parser.add_argument('--nim_epochs', type=int, default=5)
+    
+    parser.add_argument('--retrain_epochs', type=int, default=100)
+    parser.add_argument('--retrain_patience', type=int, default=30)
+    parser.add_argument('--save_retrained_model', action='store_true', default=False)
+    
+    parser.add_argument('--cert_removal_type', type=str, default='edge')
+    
+    parser.add_argument('--lissa_batch_size', type=int, default=256)
+    parser.add_argument('--lissa_recursions', type=int, default=200)
+    parser.add_argument('--lissa_damp', type=float, default=0.5)
+    parser.add_argument('--lissa_scale', type=float, default=50.0)
+    parser.add_argument('--lissa_convergence_tol', type=float, default=1e-4)
+    parser.add_argument('--lissa_check_every', type=int, default=50)
+    parser.add_argument('--max_update_ratio', type=float, default=0.01)
     # args for attack
     parser.add_argument("--num_add", type=int, default=10000)
     parser.add_argument("--max_deg", type=int, default=5)
